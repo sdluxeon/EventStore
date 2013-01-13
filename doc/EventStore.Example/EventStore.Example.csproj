@@ -62,6 +62,14 @@
     <Reference Include="EventStore (ILMerged)" Condition="'$(ILMerged)' == 'true'">
       <HintPath>..\..\output\bin\EventStore.dll</HintPath>
     </Reference>
+    <ProjectReference Include="..\..\src\proj\EventStore.Serialization.ProtocolBuffers.Wireup\EventStore.Serialization.ProtocolBuffers.Wireup.csproj">
+      <Project>{C10F3182-1F70-4EF5-B3DE-05D6D15A1259}</Project>
+      <Name>EventStore.Serialization.ProtocolBuffers.Wireup</Name>
+    </ProjectReference>
+    <ProjectReference Include="..\..\src\proj\EventStore.Serialization.ProtocolBuffers\EventStore.Serialization.ProtocolBuffers.csproj">
+      <Project>{48D8F8C9-A334-4518-A7EB-95D605B03401}</Project>
+      <Name>EventStore.Serialization.ProtocolBuffers</Name>
+    </ProjectReference>
     <ProjectReference Include="..\..\src\proj\EventStore\EventStore.csproj" Condition="'$(ILMerged)' != 'true'">
       <Project>{03946843-F343-419C-88EF-3E446D08DFA6}</Project>
       <Name>EventStore</Name>
