@@ -14,96 +14,99 @@ namespace EventStore.Serialization
     public class ProtocolBufferSerializer : ISerialize
     {
         private const int GuidLengthInBytes = 16;
-
         private static readonly MD5 TypeHasher = MD5.Create(); // creates 16-byte hashes
-
-        private readonly Dictionary<Type, Func<Stream, object>> deserializers = new Dictionary<Type, Func<Stream, object>>();
-
         private readonly Dictionary<Guid, Type> hashes = new Dictionary<Guid, Type>();
-
         private readonly Dictionary<Type, Guid> types = new Dictionary<Type, Guid>();
-
-        public ProtocolBufferSerializer(params Type[] dataContracts)
-            : this()
-        {
-            var contracts = dataContracts ?? new Type[] { };
-            foreach (var contract in contracts)
-            {
-                if (contracts.Contains(contract.BaseType))
-                    RegisterContract(new Tuple<Type, Type>(contract.BaseType, contract));
-                else
-                    RegisterContract(new Tuple<Type, Type>(typeof(object), contract));
-            }
-        }
+        private readonly Dictionary<Type, Func<Stream, object>> deserializers = new Dictionary<Type, Func<Stream, object>>();
 
         public ProtocolBufferSerializer(params string[] contractAssemblyFileNamePatterns)
             : this(contractAssemblyFileNamePatterns.LoadAssemblies())
         {
         }
-
         public ProtocolBufferSerializer(params Assembly[] contractAssemblies)
             : this(contractAssemblies.SelectMany(assembly => assembly.GetTypes().Where(x => x.GetCustomAttributes(false).Where(y => y.GetType().Name == "DataContractAttribute" || y.GetType().Name == "ProtoContractAttribute").Count() > 0)).ToArray())
         {
         }
-
+        public ProtocolBufferSerializer(params Type[] dataContracts)
+            : this()
+        {
+            foreach (var contract in dataContracts ?? new Type[] { })
+            {
+                RegisterContract(contract);
+            }
+        }
         public ProtocolBufferSerializer()
         {
             RegisterCommonTypes();
         }
 
-        public Type BuildSerializationWrapperType(Type contract)
+        private void RegisterCommonTypes()
         {
-            var wrapperType = typeof(StronglyTypedEventMessage<>);
-            Type[] typeArgs = { contract };
-            return wrapperType.MakeGenericType(typeArgs);
-        }
+            RegisterContract(typeof(Commit));
+            //RegisterContract(typeof(EventMessage), typeof(StronglyTypedEventMessage<dynamic>));
+            RegisterContract(typeof(Dictionary<string, object>));
+            //RegisterContract(typeof(Dictionary<string, string>));
+            //RegisterContract(typeof(List<object>));
+            RegisterContract(typeof(List<EventMessage>), typeof(List<StronglyTypedEventMessage<dynamic>>));
 
-        public virtual object Deserialize(Stream input)
-        {
-            if (input == null)
-                return null;
-
-            var contractType = ReadContractType(input);
-            var deserialized = deserializers[contractType](input);
-            if (deserialized is List<StronglyTypedEventMessage<dynamic>>)
-                return ((List<StronglyTypedEventMessage<dynamic>>)deserialized).ConvertAll(x => x.ToEventMessage()).ToList();
-            else
-                return deserialized;
-        }
-
-        public T Deserialize<T>(Stream input)
-        {
-            return (T)Deserialize(input);
+            RegisterContract(typeof(Exception));
+            RegisterContract(typeof(SerializationException));
         }
 
         public void RegisterContract(Type contract)
         {
-            RegisterContract(new Tuple<Type, Type>(typeof(object), contract), contract);
+            RegisterContract(contract, contract);
         }
 
         public void RegisterContract(Type contract, Type serializationDtoContract)
         {
-            RegisterContract(new Tuple<Type, Type>(typeof(object), contract), serializationDtoContract);
-        }
-
-        public void RegisterContract(Tuple<Type, Type> contract)
-        {
-            RegisterContract(contract, contract.Item2);
-        }
-
-        public void RegisterContract(Tuple<Type, Type> contract, Type serializationDtoContract)
-        {
-            if (!CanRegisterContract(contract.Item2))
+            if (!this.CanRegisterContract(contract))
                 return;
 
-            RegisterHash(contract.Item2);
-            RegisterDeserializer(contract.Item2, serializationDtoContract);
+            RegisterHash(contract);
+            RegisterDeserializer(contract, serializationDtoContract);
             RegisterToRuntimeModel(contract);
         }
 
-        public void Serialize<T>(Stream output, T graph)
+        private void RegisterToRuntimeModel(Type contract)
         {
-            Serialize(output, (object)graph);
+            if (CanRegisterContractToRuntimeModel(contract))
+            {
+                var hash = types[contract];
+                RuntimeTypeModel.Default[typeof(object)].AddSubType(Math.Abs(hash.GetHashCode() / 4), contract);
+            }
+        }
+
+        private bool CanRegisterContractToRuntimeModel(Type contract)
+        {
+            return !(typeof(System.Collections.IEnumerable).IsAssignableFrom(contract)
+                || (typeof(string) == contract));
+        }
+
+        private bool CanRegisterContract(Type contract)
+        {
+            return contract != null
+                && !types.ContainsKey(contract)
+                && !string.IsNullOrEmpty(contract.FullName);
+        }
+        private void RegisterHash(Type contract)
+        {
+            var bytes = Encoding.Unicode.GetBytes(contract.FullName ?? string.Empty);
+            var hash = new Guid(TypeHasher.ComputeHash(bytes));
+            hashes[hash] = contract;
+            types[contract] = hash;
+        }
+
+        private void RegisterDeserializer(Type contract, Type serializationDtoContract)
+        {
+            // TODO: make this faster by using reflection to create a delegate and then invoking the delegate
+            var deserialize = typeof(Serializer).GetMethod("Deserialize").MakeGenericMethod(serializationDtoContract);
+            deserializers[contract] = stream => deserialize.Invoke(null, new object[] { stream });
+        }
+
+        private void RegisterDeserializer(Type contract)
+        {
+            RegisterDeserializer(contract, contract);
         }
 
         public virtual void Serialize(Stream output, object graph)
@@ -123,19 +126,35 @@ namespace EventStore.Serialization
                 Serializer.Serialize(output, graph);
         }
 
-        private bool CanRegisterContract(Type contract)
+        public Type BuildSerializationWrapperType(Type contract)
         {
-            return contract != null
-                && !types.ContainsKey(contract)
-                && !string.IsNullOrEmpty(contract.FullName);
+            var wrapperType = typeof(StronglyTypedEventMessage<>);
+            Type[] typeArgs = { contract };
+            return wrapperType.MakeGenericType(typeArgs);
         }
 
-        private bool CanRegisterContractToRuntimeModel(Type contract)
+        private void WriteContractTypeToStream(Stream output, Type contract)
         {
-            return !(typeof(System.Collections.IEnumerable).IsAssignableFrom(contract)
-                || (typeof(string) == contract));
+            Guid hash;
+            if (!types.TryGetValue(contract, out hash))
+                throw new SerializationException(ExceptionMessages.UnableToSerialize.FormatWith(contract));
+
+            var header = hash.ToByteArray();
+            output.Write(header, 0, GuidLengthInBytes);
         }
 
+        public virtual object Deserialize(Stream input)
+        {
+            if (input == null)
+                return null;
+
+            var contractType = ReadContractType(input);
+            var deserialized = deserializers[contractType](input);
+            if (deserialized is List<StronglyTypedEventMessage<dynamic>>)
+                return ((List<StronglyTypedEventMessage<dynamic>>)deserialized).ConvertAll(x => x.ToEventMessage()).ToList();
+            else
+                return deserialized;
+        }
         private Type ReadContractType(Stream serialized)
         {
             var header = new byte[GuidLengthInBytes];
@@ -149,49 +168,14 @@ namespace EventStore.Serialization
             return contract;
         }
 
-        private void RegisterCommonTypes()
+        public T Deserialize<T>(Stream input)
         {
-            RegisterContract(typeof(Commit));
-            RegisterContract(typeof(Dictionary<string, object>));
-            RegisterContract(typeof(List<EventMessage>), typeof(List<StronglyTypedEventMessage<dynamic>>));
-
-            RegisterContract(typeof(Exception));
-            RegisterContract(typeof(SerializationException));
+            return (T)Deserialize(input);
         }
 
-        private void RegisterDeserializer(Type contract, Type serializationDtoContract)
+        public void Serialize<T>(Stream output, T graph)
         {
-            // TODO: make this faster by using reflection to create a delegate and then invoking the delegate
-            var deserialize = typeof(Serializer).GetMethod("Deserialize").MakeGenericMethod(serializationDtoContract);
-            deserializers[contract] = stream => deserialize.Invoke(null, new object[] { stream });
+            Serialize(output, (object)graph);
         }
-
-        private void RegisterHash(Type contract)
-        {
-            var bytes = Encoding.Unicode.GetBytes(contract.FullName ?? string.Empty);
-            var hash = new Guid(TypeHasher.ComputeHash(bytes));
-            hashes[hash] = contract;
-            types[contract] = hash;
-        }
-
-        private void RegisterToRuntimeModel(Tuple<Type, Type> contract)
-        {
-            if (CanRegisterContractToRuntimeModel(contract.Item2))
-            {
-                var hash = types[contract.Item2];
-                RuntimeTypeModel.Default[contract.Item1].AddSubType(Math.Abs(hash.GetHashCode()) / 4, contract.Item2);
-            }
-        }
-
-        private void WriteContractTypeToStream(Stream output, Type contract)
-        {
-            Guid hash;
-            if (!types.TryGetValue(contract, out hash))
-                throw new SerializationException(ExceptionMessages.UnableToSerialize.FormatWith(contract));
-
-            var header = hash.ToByteArray();
-            output.Write(header, 0, GuidLengthInBytes);
-        }
-
     }
 }
