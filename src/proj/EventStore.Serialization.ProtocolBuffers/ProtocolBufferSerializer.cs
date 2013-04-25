@@ -168,18 +168,43 @@ namespace EventStore.Serialization
 
         private void RegisterHash(Type contract)
         {
-            var bytes = Encoding.Unicode.GetBytes(contract.FullName ?? string.Empty);
-            var hash = new Guid(TypeHasher.ComputeHash(bytes));
-            hashes[hash] = contract;
-            types[contract] = hash;
+            DataContractAttribute attribute = (DataContractAttribute)contract
+                                                .GetCustomAttributes(false)
+                                                .Where(attrib => attrib.GetType() == typeof(DataContractAttribute))
+                                                .SingleOrDefault();
+
+            Guid contractHash = Guid.Empty;
+            if (attribute == null || String.IsNullOrWhiteSpace(attribute.Name))
+            {
+                var bytes = Encoding.Unicode.GetBytes(contract.FullName);
+                contractHash = new Guid(TypeHasher.ComputeHash(bytes));
+            }
+            else
+            {
+                Guid contarctEmbededHash;
+                if (Guid.TryParse(attribute.Name, out contarctEmbededHash))
+                    contractHash = contarctEmbededHash;
+            }
+
+            if (contractHash == Guid.Empty)
+                throw new Exception("Cannot register hash for contract " + contract.FullName);
+
+            hashes[contractHash] = contract;
+            types[contract] = contractHash;
         }
 
+        Dictionary<long, Type> runtimeModelFieldNumbers = new Dictionary<long, Type>();
         private void RegisterToRuntimeModel(Tuple<Type, Type> contract)
         {
             if (CanRegisterContractToRuntimeModel(contract.Item2))
             {
                 var hash = types[contract.Item2];
                 RuntimeTypeModel.Default[contract.Item1].AddSubType(Math.Abs(hash.GetHashCode()) / 4, contract.Item2);
+                try { runtimeModelFieldNumbers.Add(Math.Abs(hash.GetHashCode()) / 4, contract.Item2); }
+                catch (ArgumentException)
+                {
+                    throw new Exception(String.Format("A duplicate runtime model field number detected for contract '{0}'. If you use DataContractAttribute with Name='some Guid' it is recommended to test the Guid with the following condition which must be TRUE: 'Math.Abs(theGuid.GetHashCode()) % 4 == 0'.", contract.Item2.FullName));
+                }
             }
         }
 
